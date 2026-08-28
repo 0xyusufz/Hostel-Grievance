@@ -1,16 +1,26 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+
+const KEYLEN = 64;
 
 export function hashPassword(password: string): string {
-	return `sha256:${createHash('sha256').update(password).digest('hex')}`;
+	if (!password || password.length < 8) throw new Error('Password too short');
+	const salt = randomBytes(16).toString('hex');
+	const derived = scryptSync(password, salt, KEYLEN).toString('hex');
+	return `scrypt:${salt}:${derived}`;
 }
 
 export function verifyPassword(password: string, stored: string): boolean {
 	const parts = stored.split(':');
-	if (parts.length !== 2) return false;
-	const [scheme, hash] = parts;
-	if (scheme !== 'sha256' || !hash) return false;
-	const actual = createHash('sha256').update(password).digest();
-	const expected = Buffer.from(hash, 'hex');
-	if (actual.length !== expected.length) return false;
-	return timingSafeEqual(actual, expected);
+
+	if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+	const [, salt, hash] = parts;
+	if (!salt || !hash) return false;
+	try {
+		const derived = scryptSync(password, salt, KEYLEN);
+		const expected = Buffer.from(hash, 'hex');
+		if (derived.length !== expected.length) return false;
+		return timingSafeEqual(derived, expected);
+	} catch {
+		return false;
+	}
 }
