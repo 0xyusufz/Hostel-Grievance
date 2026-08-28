@@ -45,7 +45,7 @@ authRoutes.post('/login', async (c) => {
 		throw new HttpError(401, 'unauthenticated', 'Invalid email or password.');
 	}
 	// rotation: destroy old session if present
-	const old = getCookie(c, 'hg_session');
+	const old = getCookie(c, SESSION_COOKIE);
 	if (old) destroySession(db, old);
 	fails.delete((c.req.header('x-forwarded-for') ?? 'ip') + ':' + email);
 	const token = createSession(db, user.id);
