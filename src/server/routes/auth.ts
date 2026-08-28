@@ -1,6 +1,11 @@
 import { Hono } from 'hono';
+//get cookie
+import { getCookie } from 'hono/cookie';
 import type { AppEnv } from '../env.ts';
-import { createSession, clearSessionCookie, requireUser, setSessionCookie } from '../auth/session.ts';
+// session
+import { SESSION_COOKIE } from '../config.ts';
+// destroy session
+import { createSession, clearSessionCookie, requireUser, setSessionCookie, destroySession } from '../auth/session.ts';
 import { verifyPassword } from '../auth/passwords.ts';
 import { findUserByEmail } from '../db/queries.ts';
 import { toPublicUser } from '../db/map.ts';
@@ -33,9 +38,10 @@ authRoutes.post('/login', async (c) => {
 	return c.json({ user: toPublicUser(user) });
 });
 
+// logout changes in  file
 authRoutes.post('/logout', (c) => {
-	clearSessionCookie(c);
-	return c.json({ ok: true });
+	const db = c.get('db'); const t = getCookie(c, SESSION_COOKIE);
+	if (t) destroySession(db, t); clearSessionCookie(c); return c.json({ ok: true });
 });
 
 authRoutes.get('/me', (c) => {
