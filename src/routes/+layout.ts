@@ -1,33 +1,33 @@
 import { redirect } from '@sveltejs/kit';
-import { getSession } from '$lib/stores/auth.svelte';
 import type { LayoutLoad } from './$types';
+import type { User } from '$lib/types';
 
-/** Session lives in the browser (cookie + localStorage cache). */
 export const ssr = false;
 
-/**
- * Route guard: every non-login route requires a session with the matching role.
- * Runs after +layout.svelte has restored the session.
- */
-export const load: LayoutLoad = ({ url }) => {
-	const user = getSession();
+export const load: LayoutLoad = async ({ url, fetch }) => {
+	// always verify httpOnly cookie via backend, not localStorage
+	let user: User | null = null;
+	try {
+		const res = await fetch('/api/me', { credentials: 'include' });
+		if (res.ok) {
+			const json = (await res.json()) as { user: User };
+			user = json.user;
+			// sync cache for UI, not for auth decision
+			try { localStorage.setItem('hg.session.user', JSON.stringify(user)); } catch { }
+		}
+	} catch {
+		// network fail -> keep null -> redirect to login
+	}
 
 	if (url.pathname === '/login') {
-		if (user) {
-			redirect(307, user.role === 'student' ? '/student' : '/warden');
-		}
+		if (user) redirect(307, user.role === 'warden' ? '/warden' : '/student');
 		return {};
 	}
-
 	if (!user) {
+		try { localStorage.removeItem('hg.session.user'); } catch { }
 		redirect(307, '/login');
 	}
-
-	const prefix = user.role === 'student' ? '/student' : '/warden';
-	if (!url.pathname.startsWith(prefix)) {
-		// Wrong role area — send them to their own dashboard instead of a 404.
-		redirect(307, prefix);
-	}
-
+	const prefix = user.role === 'warden' ? '/warden' : '/student';
+	if (!url.pathname.startsWith(prefix)) redirect(307, prefix);
 	return {};
 };
