@@ -18,6 +18,8 @@ npm run db:reset
 
 This recreates the seeded database (3 students, 1 warden, 8 grievances, comments, and sample images).
 
+Run this once after installation, and again whenever you want to return to the original seeded state.
+
 Development logins:
 
 | Role | Email | Password |
@@ -29,16 +31,56 @@ Additional students (`priya@example.test`, `rohan@example.test`) also use `stude
 
 ## Run
 
+### Recommended: frontend and API together
+
+From the repository directory, run:
+
 ```sh
-# Frontend only (run the API separately for live workflows)
-npm run dev
-
-# API only — http://127.0.0.1:3001
-npm run dev:api
-
-# Frontend + API (Vite proxies /api → the Hono server)
 npm run dev:all
 ```
+
+This starts both services:
+
+- Frontend: Vite, usually at `http://localhost:5173`
+- API: Hono at `http://127.0.0.1:3001`
+
+Open the exact frontend URL printed by Vite. If port `5173` is already in use, Vite will choose another port such as `5174`.
+
+### Alternative: two terminals
+
+If you prefer to run the services separately:
+
+```sh
+# Terminal 1 — API
+npm run dev:api
+
+# Terminal 2 — frontend
+npm run dev
+```
+
+Then open the frontend URL printed in Terminal 2.
+
+### Frontend-only mode
+
+```sh
+npm run dev
+```
+
+This starts only the frontend. Login, grievances, comments, and attachments require the API from `npm run dev:api` to be running as well.
+
+If the browser shows `proxy error`, `ECONNREFUSED 127.0.0.1:3001`, or login requests fail, the API is not running. Stop the frontend with `Ctrl-C` and use `npm run dev:all`, or start the API in a second terminal.
+
+## Check the application
+
+After opening the frontend:
+
+1. Log in with the Student account.
+2. Browse the student dashboard and grievance details.
+3. Try the create-grievance, comment, and attachment workflows.
+4. Log out and log in with the Warden account.
+5. Browse the warden dashboard and grievance details.
+
+The challenge focuses on securing the existing application. Do not redesign the UI or change the intended student and warden workflows.
 
 ## Check and test
 
@@ -46,6 +88,8 @@ npm run dev:all
 npm run typecheck
 npm test
 ```
+
+The visible test suite contains baseline behavior checks. Because this repository is intentionally vulnerable, some security assertions may fail before hardening; do not delete or bypass those tests.
 
 The UI talks to the Hono API through `$lib/services` (`credentials: 'include'`). Vite proxies `/api` to port 3001.
 
