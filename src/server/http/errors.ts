@@ -1,3 +1,5 @@
+
+
 import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { ErrorCode } from '../types/index.ts';
@@ -5,7 +7,6 @@ import type { ErrorCode } from '../types/index.ts';
 export class HttpError extends Error {
 	readonly status: ContentfulStatusCode;
 	readonly code: ErrorCode;
-
 	constructor(status: ContentfulStatusCode, code: ErrorCode, message: string) {
 		super(message);
 		this.name = 'HttpError';
@@ -22,6 +23,11 @@ export function handleError(err: unknown, c: Context) {
 	if (err instanceof HttpError) {
 		return jsonError(c, err.status, err.code, err.message);
 	}
-	console.error(err);
-	return jsonError(c, 500, 'internal', err instanceof Error ? err.message : String(err));
+	// malformed JSON -> 400 not 500 leak
+	if (err instanceof SyntaxError) {
+		return jsonError(c, 400, 'bad_request', 'Invalid JSON.');
+	}
+	console.error('[internal]', err); // server log only
+	// never leak err.message/sqlite/stack to client
+	return jsonError(c, 500, 'internal', 'Internal server error.');
 }
