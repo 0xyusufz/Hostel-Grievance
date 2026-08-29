@@ -2,6 +2,9 @@
 
 University hostel grievance portal — Svelte 5 UI plus a small local Hono + SQLite API. Built as a security-lab baseline, not a production platform.
 
+NOTION DOCS
+## https://solid-warlock-61d.notion.site/Code-Debug-Before-vs-After-Fix-Report-3cb5607937fa81f48936c37bead0ba4e?pvs=73
+
 ## Install
 
 ```sh
