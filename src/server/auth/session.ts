@@ -5,6 +5,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { SESSION_COOKIE, SESSION_TTL_SECONDS } from '../config.ts';
 import { HttpError } from '../http/errors.ts';
 import type { SessionUser } from '../types/index.ts';
+import { audit } from '../http/audit.ts';
 
 function nowIso(): string { return new Date().toISOString(); }
 function expiryIso(): string { return new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString(); }
@@ -46,9 +47,15 @@ export function clearSessionCookie(c: Context): void {
 
 export function requireUser(c: Context, db: Database): SessionUser {
 	const token = getCookie(c, SESSION_COOKIE);
-	if (!token) throw new HttpError(401, 'unauthenticated', 'Authentication required.');
+	if (!token) {
+		audit(c, 'auth.session.invalid', { reason: 'missing_token', result: 'failure' });
+		throw new HttpError(401, 'unauthenticated', 'Authentication required.');
+	}
 	const user = readSessionUser(db, token);
-	if (!user) throw new HttpError(401, 'unauthenticated', 'Authentication required.');
+	if (!user) {
+		audit(c, 'auth.session.invalid', { reason: 'invalid_token', result: 'failure' });
+		throw new HttpError(401, 'unauthenticated', 'Authentication required.');
+	}
 	return user;
 }
 
