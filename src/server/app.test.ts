@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from './app.ts';
 import { openDatabase } from './db/connection.ts';
 import { seedDatabase } from './db/seed.ts';
@@ -313,5 +313,106 @@ describe('HostelGrievance API baseline + security', () => {
 		} finally {
 			if (prev === undefined) delete process.env.TRUST_PROXY; else process.env.TRUST_PROXY = prev;
 		}
+	});
+
+	// FIX #3 — audit logging
+	it('FIX #3 A — successful login logs auth.login.success', async () => {
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await login(app, 'student@example.test', 'student123');
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'auth.login.success' && l.userId === 'stu-1' && l.email === 'student@example.test' && l.result === 'success' && l.clientIp && l.timestamp)).toBe(true);
+		expect(logs.some(l => JSON.stringify(l).includes('student123'))).toBe(false);
+		spy.mockRestore();
+	});
+	it('FIX #3 B — failed login logs auth.login.failure without password', async () => {
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrongpass' }) });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'auth.login.failure' && l.email === 'student@example.test' && l.result === 'failure')).toBe(true);
+		expect(logs.some(l => JSON.stringify(l).includes('wrongpass'))).toBe(false);
+		expect(logs.some(l => JSON.stringify(l).includes('password'))).toBe(false);
+		spy.mockRestore();
+	});
+	it('FIX #3 C — logout logs auth.logout', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/logout', { method: 'POST', headers: { Cookie: cookie } });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'auth.logout' && l.userId === 'stu-1')).toBe(true);
+		expect(logs.some(l => JSON.stringify(l).includes('hg_session'))).toBe(false);
+		spy.mockRestore();
+	});
+	it('FIX #3 D — authz.denied on BOLA grievance', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/grievances/GRV-0003', { headers: { Cookie: cookie } });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'authz.denied' && l.userId === 'stu-1' && l.resourceId === 'GRV-0003')).toBe(true);
+		spy.mockRestore();
+	});
+	it('FIX #3 E — warden-only denied logs authz.denied', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/grievances/GRV-0001', { method: 'PATCH', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ status: 'Resolved' }) });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'authz.denied' && l.reason === 'warden_only_status')).toBe(true);
+		spy.mockRestore();
+	});
+	it('FIX #3 F — login rate_limit.hit', async () => {
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		for (let i = 0; i < 5; i++) await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'rate_limit.hit' && l.reason === 'login')).toBe(true);
+		spy.mockRestore();
+	});
+	it('FIX #3 G — H-017 rate_limit.hit', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		for (let i = 0; i < 5; i++) await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: `Rate ${i}`, category: 'Other', description: 'Description must be at least twenty characters long for test.' }) });
+		await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: 'Blocked', category: 'Other', description: 'Description must be at least twenty characters long for test.' }) });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'rate_limit.hit' && l.reason === 'grievance_create')).toBe(true);
+		spy.mockRestore();
+	});
+	it('FIX #3 H — attachment.rejected', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		const huge = new Uint8Array(2 * 1024 * 1024 + 1);
+		const fd = new FormData(); fd.append('file', new File([huge], 'big.png', { type: 'image/png' }));
+		// need a grievance to attach to
+		const g = await (await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: 'Attach reject test', category: 'Other', description: 'Description must be at least twenty characters long for attach.' }) })).json() as any;
+		await app.request(`/api/grievances/${g.data.id}/attachments`, { method: 'POST', headers: { Cookie: cookie }, body: fd });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		expect(logs.some(l => l.event === 'attachment.rejected')).toBe(true);
+		expect(logs.some(l => JSON.stringify(l).includes('big.png'))).toBe(false);
+		spy.mockRestore();
+	});
+	it('FIX #3 I — logs contain timestamp/event/clientIp and JKL no secrets', async () => {
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		const e = logs.find(l => l.event === 'auth.login.failure');
+		expect(e.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+		expect(e.clientIp).toBeTruthy();
+		expect(JSON.stringify(logs).includes('wrong')).toBe(false);
+		spy.mockRestore();
+	});
+	it('FIX #3 N — client IP from getClientIp not spoofed', async () => {
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '9.9.9.9' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		const logs = spy.mock.calls.map(c => { try { return JSON.parse(c[0] as string); } catch { return null; } }).filter(Boolean) as any[];
+		const e = logs.find(l => l.event === 'auth.login.failure');
+		expect(e.clientIp).not.toBe('9.9.9.9');
+		expect(e.clientIp).toBe('127.0.0.1');
+		spy.mockRestore();
+	});
+	it('FIX #3 M — grievance body not logged', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+		await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ body: 'secret comment body' }) });
+		const logs = spy.mock.calls.map(c => JSON.stringify(c)).join('');
+		expect(logs.includes('secret comment body')).toBe(false);
+		spy.mockRestore();
 	});
 });
