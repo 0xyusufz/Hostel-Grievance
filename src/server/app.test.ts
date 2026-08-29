@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from './app.ts';
 import { openDatabase } from './db/connection.ts';
 import { seedDatabase } from './db/seed.ts';
+import { __clearRateLimits } from './http/rateLimit.ts';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
@@ -43,6 +44,7 @@ describe('HostelGrievance API baseline + security', () => {
 		app = createApp({ db, uploadsDir: uploadDir });
 	});
 	afterEach(() => {
+		__clearRateLimits();
 		try { db.close(); } catch { }
 		rmSync(dir, { recursive: true, force: true });
 	});
@@ -154,5 +156,93 @@ describe('HostelGrievance API baseline + security', () => {
 		const res = await app.request('/api/grievances/GRV-9999', { headers: { Cookie: cookie } });
 		expect(res.status).toBe(404);
 		expect(JSON.stringify(await res.json())).not.toMatch(/sqlite|stack|ENOENT/i);
+	});
+
+	// H-017 rate limiting
+	it('TEST A — grievance rate limit 5/hour', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		for (let i = 0; i < 5; i++) {
+			const res = await app.request('/api/grievances', {
+				method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+				body: JSON.stringify({ title: `Rate grievance ${i} title`, category: 'Other', description: 'Description must be at least twenty characters long for test.' })
+			});
+			expect(res.status).toBe(201);
+		}
+		const before = (db.prepare('SELECT COUNT(*) as n FROM grievances WHERE student_id=?').get('stu-1') as { n: number }).n;
+		const blocked = await app.request('/api/grievances', {
+			method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie },
+			body: JSON.stringify({ title: 'Blocked grievance title', category: 'Other', description: 'Description must be at least twenty characters long for test.' })
+		});
+		expect(blocked.status).toBe(429);
+		const after = (db.prepare('SELECT COUNT(*) as n FROM grievances WHERE student_id=?').get('stu-1') as { n: number }).n;
+		expect(after).toBe(before);
+	});
+	it('TEST B — grievance user isolation', async () => {
+		const { cookie: c1 } = await login(app, 'student@example.test', 'student123');
+		for (let i = 0; i < 5; i++) {
+			await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c1 }, body: JSON.stringify({ title: `Isolate grievance ${i}`, category: 'Other', description: 'Description must be at least twenty characters long for isolation.' }) });
+		}
+		expect((await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c1 }, body: JSON.stringify({ title: 'Blocked', category: 'Other', description: 'Description must be at least twenty characters long for isolation.' }) })).status).toBe(429);
+		const { cookie: c2 } = await login(app, 'priya@example.test', 'student123');
+		const res2 = await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c2 }, body: JSON.stringify({ title: 'Priya allowed grievance', category: 'Other', description: 'Description must be at least twenty characters long for isolation.' }) });
+		expect(res2.status).toBe(201);
+	});
+	it('TEST C — comment rate limit 20/hour', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		for (let i = 0; i < 20; i++) {
+			const res = await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ body: `comment ${i}` }) });
+			expect(res.status).toBe(201);
+		}
+		const before = (db.prepare('SELECT COUNT(*) as n FROM comments WHERE grievance_id=?').get('GRV-0001') as { n: number }).n;
+		const blocked = await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ body: 'blocked comment' }) });
+		expect(blocked.status).toBe(429);
+		const after = (db.prepare('SELECT COUNT(*) as n FROM comments WHERE grievance_id=?').get('GRV-0001') as { n: number }).n;
+		expect(after).toBe(before);
+	});
+	it('TEST D — comment user isolation', async () => {
+		const { cookie: c1 } = await login(app, 'student@example.test', 'student123');
+		for (let i = 0; i < 20; i++) await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c1 }, body: JSON.stringify({ body: `iso ${i}` }) });
+		expect((await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c1 }, body: JSON.stringify({ body: 'blocked' }) })).status).toBe(429);
+		const { cookie: c2 } = await login(app, 'priya@example.test', 'student123');
+		// priya comments on her own grievance GRV-0003
+		const res2 = await app.request('/api/grievances/GRV-0003/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c2 }, body: JSON.stringify({ body: 'priya allowed' }) });
+		expect(res2.status).toBe(201);
+	});
+	it('TEST E — attachment rate limit 10/hour', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		const created = await (await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: 'Attach rate test grievance', category: 'Other', description: 'Description must be at least twenty characters long for attach.' }) })).json() as any;
+		const gid = created.data.id;
+		const beforeFiles = readdirSync(join(dir, 'uploads')).length;
+		const beforeRows = (db.prepare('SELECT COUNT(*) as n FROM attachments').get() as { n: number }).n;
+		for (let i = 0; i < 10; i++) {
+			const fd = new FormData(); fd.append('file', new File([PNG], `a${i}.png`, { type: 'image/png' }));
+			expect((await app.request(`/api/grievances/${gid}/attachments`, { method: 'POST', headers: { Cookie: cookie }, body: fd })).status).toBe(201);
+		}
+		const fdBlock = new FormData(); fdBlock.append('file', new File([PNG], 'blocked.png', { type: 'image/png' }));
+		expect((await app.request(`/api/grievances/${gid}/attachments`, { method: 'POST', headers: { Cookie: cookie }, body: fdBlock })).status).toBe(429);
+		expect((db.prepare('SELECT COUNT(*) as n FROM attachments').get() as { n: number }).n).toBe(beforeRows + 10);
+		expect(readdirSync(join(dir, 'uploads')).length).toBe(beforeFiles + 10);
+	});
+	it('TEST F — attachment user isolation', async () => {
+		const { cookie: c1 } = await login(app, 'student@example.test', 'student123');
+		const g1 = await (await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c1 }, body: JSON.stringify({ title: 'Attach iso grievance a', category: 'Other', description: 'Description must be at least twenty characters long for isolation attach.' }) })).json() as any;
+		for (let i = 0; i < 10; i++) { const fd = new FormData(); fd.append('file', new File([PNG], `a${i}.png`, { type: 'image/png' })); await app.request(`/api/grievances/${g1.data.id}/attachments`, { method: 'POST', headers: { Cookie: c1 }, body: fd }); }
+		expect((await (async () => { const fd = new FormData(); fd.append('file', new File([PNG], 'blocked.png', { type: 'image/png' })); return app.request(`/api/grievances/${g1.data.id}/attachments`, { method: 'POST', headers: { Cookie: c1 }, body: fd }); })()).status).toBe(429);
+		const { cookie: c2 } = await login(app, 'priya@example.test', 'student123');
+		const g2 = await (await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: c2 }, body: JSON.stringify({ title: 'Attach iso grievance b', category: 'Other', description: 'Description must be at least twenty characters long for isolation attach.' }) })).json() as any;
+		const fd2 = new FormData(); fd2.append('file', new File([PNG], 'priya.png', { type: 'image/png' }));
+		expect((await app.request(`/api/grievances/${g2.data.id}/attachments`, { method: 'POST', headers: { Cookie: c2 }, body: fd2 })).status).toBe(201);
+	});
+	it('TEST G — route bucket isolation', async () => {
+		const { cookie } = await login(app, 'student@example.test', 'student123');
+		for (let i = 0; i < 20; i++) await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ body: `bucket ${i}` }) });
+		expect((await app.request('/api/grievances/GRV-0001/comments', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ body: 'blocked' }) })).status).toBe(429);
+		// grievance bucket independent
+		const gRes = await app.request('/api/grievances', { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify({ title: 'Bucket isolate grievance', category: 'Other', description: 'Description must be at least twenty characters long for bucket.' }) });
+		expect(gRes.status).toBe(201);
+		// attachment bucket independent
+		const gid = (await gRes.json() as any).data.id;
+		const fd = new FormData(); fd.append('file', new File([PNG], 'iso.png', { type: 'image/png' }));
+		expect((await app.request(`/api/grievances/${gid}/attachments`, { method: 'POST', headers: { Cookie: cookie }, body: fd })).status).toBe(201);
 	});
 });

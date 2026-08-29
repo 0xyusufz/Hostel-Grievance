@@ -19,6 +19,11 @@ import { toPublicAttachment, toPublicComment, toPublicUser } from '../db/map.ts'
 import { HttpError } from '../http/errors.ts';
 import { parseCategory, statusToDb } from '../http/status.ts';
 import { bufferFromUpload, newStoredName, originalBasename, writeStoredFile } from '../storage/attachments.ts';
+import { createRateLimiter } from '../http/rateLimit.ts';
+
+const grievanceCreateLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 5 });
+const commentCreateLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
+const attachmentCreateLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 10 });
 
 function nowIso(): string { return new Date().toISOString(); }
 function readString(v: unknown): string | undefined { return typeof v === 'string' ? v : undefined; }
@@ -35,6 +40,7 @@ grievanceRoutes.get('/', (c) => {
 grievanceRoutes.post('/', async (c) => {
 	const db = c.get('db'); const uploadsDir = c.get('uploadsDir'); const user = requireUser(c, db);
 	if (user.role !== 'student') throw new HttpError(403, 'unauthorized', 'Only students can file grievances.');
+	grievanceCreateLimiter.check(user.id);
 	const contentType = c.req.header('content-type') ?? '';
 	let title = '', category = '', description = ''; let upload: File | undefined;
 	if (contentType.includes('multipart/form-data')) {
@@ -81,6 +87,7 @@ grievanceRoutes.post('/:id/comments', async (c) => {
 	const db = c.get('db'); const user = requireUser(c, db);
 	const row = requireGrievance(db, c.req.param('id'));
 	assertCanViewGrievance(user, row);
+	commentCreateLimiter.check(user.id);
 	let body: unknown; try { body = await c.req.json(); } catch { throw new HttpError(400, 'bad_request', 'JSON body is required.'); }
 	const text = body && typeof body === 'object' && 'body' in body && typeof body.body === 'string' ? sanitizeBody(body.body) : '';
 	if (!text) throw new HttpError(400, 'bad_request', 'Comment cannot be empty.');
@@ -98,6 +105,7 @@ grievanceRoutes.post('/:id/attachments', async (c) => {
 	const row = requireGrievance(db, c.req.param('id'));
 	if (user.role !== 'student' || row.student_id !== user.id) throw new HttpError(403, 'unauthorized', 'Only the student owner can add attachments.');
 	if (row.status === 'resolved') throw new HttpError(409, 'conflict', 'Resolved grievances cannot be edited.');
+	attachmentCreateLimiter.check(user.id);
 	const body = await c.req.parseBody();
 	const upload = body.file instanceof File ? body.file : body.attachment instanceof File ? body.attachment : undefined;
 	if (!upload) throw new HttpError(400, 'bad_request', 'A file field named file is required.');
