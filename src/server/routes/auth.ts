@@ -7,20 +7,22 @@ import { findUserByEmail } from '../db/queries.ts';
 import { toPublicUser } from '../db/map.ts';
 import { HttpError } from '../http/errors.ts';
 import { SESSION_COOKIE } from '../config.ts';
+import { getClientIp } from '../http/ip.ts';
 
 export const authRoutes = new Hono<AppEnv>();
 
-// simple in-memory rate-limit: 5 fails / 15min per IP+email
+// simple in-memory rate-limit: 5 fails / 15min per IP+email — IP via getClientIp (TRUST_PROXY aware)
 const fails = new Map<string, { n: number; reset: number }>();
+export function __clearLoginRateLimits() { fails.clear(); }
 function checkRate(c: any, email: string) {
-	const key = (c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip') ?? 'ip') + ':' + email;
+	const key = getClientIp(c) + ':' + email;
 	const now = Date.now();
 	const e = fails.get(key);
 	if (e && now < e.reset && e.n >= 5) throw new HttpError(429, 'bad_request', 'Too many attempts, try later.');
 	if (e && now >= e.reset) fails.delete(key);
 }
 function recordFail(email: string, c: any) {
-	const key = (c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip') ?? 'ip') + ':' + email;
+	const key = getClientIp(c) + ':' + email;
 	const e = fails.get(key);
 	if (!e) fails.set(key, { n: 1, reset: Date.now() + 15 * 60 * 1000 });
 	else e.n++;
@@ -47,7 +49,7 @@ authRoutes.post('/login', async (c) => {
 	// rotation: destroy old session if present
 	const old = getCookie(c, SESSION_COOKIE);
 	if (old) destroySession(db, old);
-	fails.delete((c.req.header('x-forwarded-for') ?? 'ip') + ':' + email);
+	fails.delete(getClientIp(c) + ':' + email);
 	const token = createSession(db, user.id);
 	setSessionCookie(c, token);
 	return c.json({ user: toPublicUser(user) });
