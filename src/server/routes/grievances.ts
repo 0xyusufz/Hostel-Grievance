@@ -20,6 +20,7 @@ import { HttpError } from '../http/errors.ts';
 import { parseCategory, statusToDb } from '../http/status.ts';
 import { bufferFromUpload, newStoredName, originalBasename, writeStoredFile } from '../storage/attachments.ts';
 import { createRateLimiter } from '../http/rateLimit.ts';
+import { audit } from '../http/audit.ts';
 
 const grievanceCreateLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 5 });
 const commentCreateLimiter = createRateLimiter({ windowMs: 60 * 60 * 1000, max: 20 });
@@ -39,8 +40,11 @@ grievanceRoutes.get('/', (c) => {
 
 grievanceRoutes.post('/', async (c) => {
 	const db = c.get('db'); const uploadsDir = c.get('uploadsDir'); const user = requireUser(c, db);
-	if (user.role !== 'student') throw new HttpError(403, 'unauthorized', 'Only students can file grievances.');
-	grievanceCreateLimiter.check(user.id);
+	if (user.role !== 'student') {
+		audit(c, 'authz.denied', { userId: user.id, role: user.role, reason: 'warden_create_grievance', result: 'denied' });
+		throw new HttpError(403, 'unauthorized', 'Only students can file grievances.');
+	}
+	try { grievanceCreateLimiter.check(user.id); } catch (e) { if (e instanceof HttpError && e.status === 429) audit(c, 'rate_limit.hit', { userId: user.id, reason: 'grievance_create', result: 'blocked' }); throw e; }
 	const contentType = c.req.header('content-type') ?? '';
 	let title = '', category = '', description = ''; let upload: File | undefined;
 	if (contentType.includes('multipart/form-data')) {
@@ -62,7 +66,8 @@ grievanceRoutes.post('/', async (c) => {
 	const id = nextGrievanceId(db); const ts = nowIso();
 	db.prepare(`INSERT INTO grievances (id, student_id, title, category, description, status, created_at, updated_at) VALUES (?,?,?,?,?,'open',?,?)`).run(id, user.id, title, parsedCategory, description, ts, ts);
 	if (upload) {
-		const bytes = await bufferFromUpload(upload);
+		let bytes: Buffer;
+		try { bytes = await bufferFromUpload(upload); } catch (e) { if (e instanceof HttpError && e.status === 400) audit(c, 'attachment.rejected', { userId: user.id, reason: (e as Error).message, result: 'rejected' }); throw e; }
 		const stored = newStoredName(upload.type); // fixed: never use originalName
 		writeStoredFile(uploadsDir, stored, bytes);
 		db.prepare(`INSERT INTO attachments (id, grievance_id, original_filename, stored_filename, mime_type, size_bytes, created_at) VALUES (?,?,?,?,?,?,?)`)
@@ -74,7 +79,7 @@ grievanceRoutes.post('/', async (c) => {
 grievanceRoutes.get('/:id/comments', (c) => {
 	const db = c.get('db'); const user = requireUser(c, db);
 	const row = requireGrievance(db, c.req.param('id'));
-	assertCanViewGrievance(user, row);
+	try { assertCanViewGrievance(user, row); } catch (e) { if (e instanceof HttpError && e.status === 403) audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'BOLA_comments_view', result: 'denied' }); throw e; }
 	const comments = listCommentRows(db, row.id).map(comment => {
 		const authorRow = findUserById(db, comment.author_id);
 		if (!authorRow) throw new HttpError(500, 'internal', 'Internal server error.');
@@ -86,8 +91,8 @@ grievanceRoutes.get('/:id/comments', (c) => {
 grievanceRoutes.post('/:id/comments', async (c) => {
 	const db = c.get('db'); const user = requireUser(c, db);
 	const row = requireGrievance(db, c.req.param('id'));
-	assertCanViewGrievance(user, row);
-	commentCreateLimiter.check(user.id);
+	try { assertCanViewGrievance(user, row); } catch (e) { if (e instanceof HttpError && e.status === 403) audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'BOLA_comment_create', result: 'denied' }); throw e; }
+	try { commentCreateLimiter.check(user.id); } catch (e) { if (e instanceof HttpError && e.status === 429) audit(c, 'rate_limit.hit', { userId: user.id, reason: 'comment_create', result: 'blocked' }); throw e; }
 	let body: unknown; try { body = await c.req.json(); } catch { throw new HttpError(400, 'bad_request', 'JSON body is required.'); }
 	const text = body && typeof body === 'object' && 'body' in body && typeof body.body === 'string' ? sanitizeBody(body.body) : '';
 	if (!text) throw new HttpError(400, 'bad_request', 'Comment cannot be empty.');
@@ -103,13 +108,17 @@ grievanceRoutes.post('/:id/comments', async (c) => {
 grievanceRoutes.post('/:id/attachments', async (c) => {
 	const db = c.get('db'); const user = requireUser(c, db);
 	const row = requireGrievance(db, c.req.param('id'));
-	if (user.role !== 'student' || row.student_id !== user.id) throw new HttpError(403, 'unauthorized', 'Only the student owner can add attachments.');
+	if (user.role !== 'student' || row.student_id !== user.id) {
+		audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'BOLA_attachment_create', result: 'denied' });
+		throw new HttpError(403, 'unauthorized', 'Only the student owner can add attachments.');
+	}
 	if (row.status === 'resolved') throw new HttpError(409, 'conflict', 'Resolved grievances cannot be edited.');
-	attachmentCreateLimiter.check(user.id);
+	try { attachmentCreateLimiter.check(user.id); } catch (e) { if (e instanceof HttpError && e.status === 429) audit(c, 'rate_limit.hit', { userId: user.id, reason: 'attachment_create', result: 'blocked' }); throw e; }
 	const body = await c.req.parseBody();
 	const upload = body.file instanceof File ? body.file : body.attachment instanceof File ? body.attachment : undefined;
 	if (!upload) throw new HttpError(400, 'bad_request', 'A file field named file is required.');
-	const bytes = await bufferFromUpload(upload);
+	let bytes: Buffer;
+	try { bytes = await bufferFromUpload(upload); } catch (e) { if (e instanceof HttpError && e.status === 400) audit(c, 'attachment.rejected', { userId: user.id, reason: e.message, result: 'rejected' }); throw e; }
 	const stored = newStoredName(upload.type); // fixed
 	const ts = nowIso();
 	writeStoredFile(c.get('uploadsDir'), stored, bytes);
@@ -124,7 +133,7 @@ grievanceRoutes.post('/:id/attachments', async (c) => {
 grievanceRoutes.get('/:id', (c) => {
 	const db = c.get('db'); const user = requireUser(c, db);
 	const row = requireGrievance(db, c.req.param('id'));
-	assertCanViewGrievance(user, row);
+	try { assertCanViewGrievance(user, row); } catch (e) { if (e instanceof HttpError && e.status === 403) audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'BOLA_grievance_view', result: 'denied' }); throw e; }
 	return c.json({ data: assembleGrievance(db, row) });
 });
 
@@ -142,8 +151,14 @@ grievanceRoutes.patch('/:id', async (c) => {
 	if (!wantsContent && !wantsStatus) throw new HttpError(400, 'bad_request', 'No updatable fields were provided.');
 	switch (user.role) {
 		case 'student': {
-			if (row.student_id !== user.id) throw new HttpError(403, 'unauthorized', 'You cannot edit this grievance.');
-			if (wantsStatus) throw new HttpError(403, 'unauthorized', 'Only wardens can change status.');
+			if (row.student_id !== user.id) {
+				audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'BOLA_grievance_update', result: 'denied' });
+				throw new HttpError(403, 'unauthorized', 'You cannot edit this grievance.');
+			}
+			if (wantsStatus) {
+				audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'warden_only_status', result: 'denied' });
+				throw new HttpError(403, 'unauthorized', 'Only wardens can change status.');
+			}
 			if (row.status === 'resolved') throw new HttpError(409, 'conflict', 'Resolved grievances cannot be edited.');
 			let nextTitle = row.title, nextDescription = row.description, nextCategory = row.category;
 			if (title !== undefined) { if (typeof title !== 'string' || title.trim().length < 5) throw new HttpError(400, 'bad_request', 'Title must be at least 5 characters.'); nextTitle = title.trim(); }
@@ -154,7 +169,10 @@ grievanceRoutes.patch('/:id', async (c) => {
 			break;
 		}
 		case 'warden': {
-			if (wantsContent) throw new HttpError(403, 'unauthorized', 'Wardens cannot edit grievance content.');
+			if (wantsContent) {
+				audit(c, 'authz.denied', { userId: user.id, role: user.role, resourceId: row.id, reason: 'warden_content_edit', result: 'denied' });
+				throw new HttpError(403, 'unauthorized', 'Wardens cannot edit grievance content.');
+			}
 			if (typeof status !== 'string') throw new HttpError(400, 'bad_request', 'Invalid grievance status.');
 			const nextStatus = statusToDb(status); const ts = nowIso();
 			db.prepare('UPDATE grievances SET status=?,updated_at=? WHERE id=?').run(nextStatus, ts, row.id);
