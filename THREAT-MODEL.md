@@ -35,3 +35,4 @@ Same-site `vite:5173` `FRONTEND_ORIGIN`, HTTPS in prod (`Secure` flag), no `*` w
 5. **Path traversal** `file.name=../../evil.txt` -> `storage/attachments.ts:35` -> mitigate random name + `resolve` guard -> verify `400` no `../` file.
 6. **Brute** `POST /login` -> mitigate `5/15min 429` + dummy verify -> verify `429`.
 7. **Mime spoof** `shell.php as image/png` -> mitigate `sniffMime` -> verify `400 content mismatch`.
+8. **H-017 Authenticated spam** `stu POST /api/grievances|comments|attachments` loop `100/h` -> `spam/storage exhaustion` -> mitigate `src/server/http/rateLimit.ts` `5/20/10 per hour per user.id` separate buckets `429` before DB/file -> verify `vitest TEST A-G` `429` per-user/per-route isolation. Trust boundary `Browser->API` authenticated `user.id` (not `X-Forwarded-For`), residual process-local only.
