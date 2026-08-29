@@ -6,6 +6,7 @@ import { createApp } from './app.ts';
 import { openDatabase } from './db/connection.ts';
 import { seedDatabase } from './db/seed.ts';
 import { __clearRateLimits } from './http/rateLimit.ts';
+import { __clearLoginRateLimits } from './routes/auth.ts';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
@@ -45,6 +46,7 @@ describe('HostelGrievance API baseline + security', () => {
 	});
 	afterEach(() => {
 		__clearRateLimits();
+		__clearLoginRateLimits();
 		try { db.close(); } catch { }
 		rmSync(dir, { recursive: true, force: true });
 	});
@@ -244,5 +246,72 @@ describe('HostelGrievance API baseline + security', () => {
 		const gid = (await gRes.json() as any).data.id;
 		const fd = new FormData(); fd.append('file', new File([PNG], 'iso.png', { type: 'image/png' }));
 		expect((await app.request(`/api/grievances/${gid}/attachments`, { method: 'POST', headers: { Cookie: cookie }, body: fd })).status).toBe(201);
+	});
+
+	// FIX #2 — X-Forwarded-For spoofing
+	it('FIX #2 TEST 1 — X-Forwarded-For rotation does not bypass login limiter', async () => {
+		for (let i = 0; i < 5; i++) {
+			const r = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `10.0.0.${i + 1}` }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+			expect(r.status).toBe(401);
+		}
+		const blocked = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '10.0.0.99' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		expect(blocked.status).toBe(429);
+	});
+	it('FIX #2 TEST 2 — X-Real-IP rotation does not bypass', async () => {
+		for (let i = 0; i < 5; i++) {
+			const r = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Real-IP': `10.0.1.${i + 1}` }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+			expect(r.status).toBe(401);
+		}
+		expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Real-IP': '10.0.1.99' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(429);
+	});
+	it('FIX #2 TEST 3 — multiple XFF values rotation does not bypass', async () => {
+		for (let i = 0; i < 5; i++) {
+			const r = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `1.1.1.${i + 1}, 2.2.2.2` }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+			expect(r.status).toBe(401);
+		}
+		expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '9.9.9.9, 2.2.2.2' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(429);
+	});
+	it('FIX #2 TEST 4 — Forwarded header does not affect limiter', async () => {
+		for (let i = 0; i < 5; i++) {
+			const r = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', Forwarded: `for=10.0.0.${i + 1}` }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+			expect(r.status).toBe(401);
+		}
+		expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', Forwarded: 'for=10.0.0.99' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(429);
+	});
+	it('FIX #2 TEST 5 — normal login still works', async () => {
+		const ok = await login(app, 'student@example.test', 'student123');
+		expect(ok.res.status).toBe(200);
+		const bad = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrongpass' }) });
+		expect(bad.status).toBe(401);
+		expect((await bad.json() as any).code).toBe('unauthenticated');
+	});
+	it('FIX #2 TEST 7 — successful login resets bucket with same trusted IP', async () => {
+		for (let i = 0; i < 4; i++) await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		const ok = await login(app, 'student@example.test', 'student123');
+		expect(ok.res.status).toBe(200);
+		expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(401);
+		// verify 5 fails after reset still blocks 6th
+		for (let i = 0; i < 4; i++) await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+		expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(429);
+	});
+	it('FIX #2 — TRUST_PROXY true uses X-Forwarded-For first IP and validates', async () => {
+		const prev = process.env.TRUST_PROXY;
+		try {
+			process.env.TRUST_PROXY = 'true';
+			// 5 fails from 1.1.1.1 should block 1.1.1.1 but not 1.1.1.2
+			for (let i = 0; i < 5; i++) {
+				const r = await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '1.1.1.1' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) });
+				expect(r.status).toBe(401);
+			}
+			expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '1.1.1.1' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(429);
+			// different IP via XFF should be allowed
+			expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '1.1.1.2' }, body: JSON.stringify({ email: 'student@example.test', password: 'wrong' }) })).status).toBe(401);
+			// malformed XFF should fallback to remoteAddress (127.0.0.1) and be validated -> not as 429 for malformed
+			for (let i = 0; i < 5; i++) await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': 'not-an-ip' }, body: JSON.stringify({ email: 'priya@example.test', password: 'wrong' }) });
+			// malformed header should not create bucket for 'not-an-ip', next valid priya login should be 401 not 429
+			expect((await app.request('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': 'not-an-ip' }, body: JSON.stringify({ email: 'priya@example.test', password: 'wrong' }) })).status).toBe(429);
+		} finally {
+			if (prev === undefined) delete process.env.TRUST_PROXY; else process.env.TRUST_PROXY = prev;
+		}
 	});
 });
