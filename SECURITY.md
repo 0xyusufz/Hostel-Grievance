@@ -31,6 +31,19 @@ H-017 risk: authenticated `POST /api/grievances`, `POST /api/grievances/:id/comm
 
 **Login rate limit unchanged:** `5 failed / 15 minutes / IP + email` — Fix #2 only changes **trustworthiness** of IP: direct `remoteAddress+email`, proxy `validated forwarded IP+email`. **H-017 remains independent** (`user.id` per 5/20/10/hour) — not converted to IP.
 
+## Fix #3 — Security Audit Logging (Verified 2026-08-29)
+**Security events:** `auth.login.success`, `auth.login.failure`, `auth.logout`, `auth.session.invalid`, `authz.denied`, `rate_limit.hit`, `attachment.rejected` (`src/server/http/audit.ts`).
+
+**Logged metadata:** `timestamp` `new Date().toISOString()`, `event`, `userId`/`role` where available, `clientIp` via `getClientIp()`, `method`, `path`, `resourceId` where applicable, `reason`/`result` where applicable — structured `JSON.stringify` to `stdout` (`console.log`), no file/in-memory store, no new dependency.
+
+**IP handling:** `audit` uses existing `getClientIp()` — does **not** directly read `X-Forwarded-For`/`X-Real-IP`/`Forwarded`, Fix #2 remains source of truth.
+
+**Sensitive-data protection:** No `password`, `password_hash`, `session`/`hg_session`, `token`, `Authorization` header, `grievance description`, `comment body`, `file contents`, `secrets` logged — verified `TEST J/K/L/M`.
+
+**Verification:** `npm test 40/40`, `typecheck 0`, `audit 0`, `git diff --check` clean, H-001..H-017 + Fix #2 regression pass, `TEST A-N` `auth.*`/`authz`/`rate_limit`/`attachment` + `timestamp`/`clientIp` + no secrets, `X-Forwarded-For:9.9.9.9` not in `clientIp`.
+
+**Residual risk:** Logs to `stdout`/process logs only — persistence/centralized SIEM/rotation depends on deployment log collection, as with `H-017` in-memory.
+
 ## Remaining risks (Low)
 In-memory rate-limit not distributed (process-local, see H-017), sequential `GRV-0001` enumerable (blocked by 403, consider UUID), no CAPTCHA/WAF, existing `sha256` hashes need reseed, no 2FA.
 
