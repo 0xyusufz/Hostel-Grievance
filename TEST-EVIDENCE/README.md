@@ -1,5 +1,10 @@
 # TEST-EVIDENCE
 
+
+## CHECK WHAT WE HAVE DONE CHANGES AND IMPROVEMENT INSIDE THIS NOTION DOCS
+
+## https://solid-warlock-61d.notion.site/Code-Debug-Before-vs-After-Fix-Report-3cb5607937fa81f48936c37bead0ba4e?pvs=73
+
 ## Commands
 ```bash
 npm ci
