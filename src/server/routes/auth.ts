@@ -58,7 +58,7 @@ authRoutes.post('/logout', (c) => {
 	const t = getCookie(c, SESSION_COOKIE);
 	if (t) destroySession(db, t); // server-side invalidation
 	clearSessionCookie(c);
-	return c.json({ ok: true });
+	return c.json({ ok: true, success: "logout successfully" });
 });
 
 authRoutes.get('/me', (c) => {
