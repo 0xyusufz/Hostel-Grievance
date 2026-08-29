@@ -8,6 +8,7 @@ import { toPublicUser } from '../db/map.ts';
 import { HttpError } from '../http/errors.ts';
 import { SESSION_COOKIE } from '../config.ts';
 import { getClientIp } from '../http/ip.ts';
+import { audit } from '../http/audit.ts';
 
 export const authRoutes = new Hono<AppEnv>();
 
@@ -18,7 +19,10 @@ function checkRate(c: any, email: string) {
 	const key = getClientIp(c) + ':' + email;
 	const now = Date.now();
 	const e = fails.get(key);
-	if (e && now < e.reset && e.n >= 5) throw new HttpError(429, 'bad_request', 'Too many attempts, try later.');
+	if (e && now < e.reset && e.n >= 5) {
+		audit(c, 'rate_limit.hit', { reason: 'login', email, result: 'blocked' });
+		throw new HttpError(429, 'bad_request', 'Too many attempts, try later.');
+	}
 	if (e && now >= e.reset) fails.delete(key);
 }
 function recordFail(email: string, c: any) {
@@ -44,6 +48,7 @@ authRoutes.post('/login', async (c) => {
 	const ok = user ? verifyPassword(password, user.password_hash) : verifyPassword(password, 'scrypt:00000000000000000000000000000000:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000');
 	if (!user || !ok) {
 		recordFail(email, c);
+		audit(c, 'auth.login.failure', { email, reason: 'invalid_credentials', result: 'failure' });
 		throw new HttpError(401, 'unauthenticated', 'Invalid email or password.');
 	}
 	// rotation: destroy old session if present
@@ -52,14 +57,21 @@ authRoutes.post('/login', async (c) => {
 	fails.delete(getClientIp(c) + ':' + email);
 	const token = createSession(db, user.id);
 	setSessionCookie(c, token);
+	audit(c, 'auth.login.success', { userId: user.id, role: user.role, email, result: 'success' });
 	return c.json({ user: toPublicUser(user) });
 });
 
 authRoutes.post('/logout', (c) => {
 	const db = c.get('db');
 	const t = getCookie(c, SESSION_COOKIE);
-	if (t) destroySession(db, t); // server-side invalidation
+	let userId: string | undefined;
+	if (t) {
+		const u = c.get('db').prepare('SELECT user_id FROM sessions WHERE token=?').get(t) as { user_id?: string } | undefined;
+		userId = u?.user_id;
+		destroySession(db, t);
+	}
 	clearSessionCookie(c);
+	audit(c, 'auth.logout', { userId, result: 'success' });
 	return c.json({ ok: true, success: "logout successfully" });
 });
 
